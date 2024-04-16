@@ -1,20 +1,50 @@
-import sys
 import os
-import tifffile as tf
+import sys
+from shutil import copyfile
+
+import cv2
 import numpy as np
+import tifffile as tf
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtGui import QPixmap
-from shutil import copyfile
+from PyQt5.QtWidgets import QFileDialog
+from pyexiv2 import Image
+
 from ToolsUI import Ui_Dialog
-from qt_material import apply_stylesheet
-from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QLineEdit, QMainWindow, QFileDialog
 from models import Model
 
 
-def incorporatedPhaseAlignment(imageName, bindType):
-    image = tf.imread(imageName)
-    os.remove(imageName)
-    W, L = image.shape
+def darkCurrentCorrection(tif, imageName):
+    xmp = Image(imageName).read_xmp()
+    tif = np.array(tif, dtype=np.float32)
+    tif = tif / 65536.0 - float(xmp['Xmp.Camera.BlackCurrent']) / 65536.0
+    return tif
+
+
+def exposureTimeAndSensorGainCorrection(tif, imageName):
+    xmp = Image(imageName).read_xmp()
+    et = float(xmp['Xmp.drone-dji.ExposureTime'])
+    sg = float(xmp['Xmp.drone-dji.SensorGain'])
+    tif = tif / (et * sg * 1e-6)
+    return tif
+
+
+def vignettingCorrection(tif, imageName):
+    xmp = Image(imageName).read_xmp()
+    vdata = xmp['Xmp.drone-dji.VignettingData']
+    vdata = vdata.split(', ')
+    k0, k1, k2, k3, k4, k5 = [float(i) for i in vdata]
+    rows, cols = tif.shape
+    x, y = np.meshgrid(np.arange(cols), np.arange(rows))
+    r = np.sqrt((x - cols / 2) ** 2 + (y - rows / 2) ** 2)
+    polynomial_model = (k5 * r ** 6) + (k4 * r ** 5) + (k3 * r ** 4) + (k2 * r ** 3) + (k1 * r ** 2) + (k0 * r) + 1
+    tif = tif * polynomial_model
+    return tif
+
+
+def incorporatedPhaseAlignment(tif, bindType):
+    image = tif
+    L, W = image.shape
     if bindType == 'blue':
         pos_x = -17
         pos_y = -19
@@ -44,7 +74,7 @@ def incorporatedPhaseAlignment(imageName, bindType):
         image = image[:, pos_x1 * 2:W + pos_x1 * 2]
     else:  # x轴正方向，图像右移
         image = image[:, 0:W]
-    tf.imwrite(imageName, image)
+    return image
 
 
 class MyPyQT_Form(QtWidgets.QWidget, Ui_Dialog):
@@ -66,19 +96,48 @@ class MyPyQT_Form(QtWidgets.QWidget, Ui_Dialog):
         self.ResultSave.clicked.connect(self.pushSaveButton_click)
 
         self.IncorporatedPhaseAlignment.clicked.connect(self.pushIncorporatedPhaseAlignmentButton_click)
-
+        self.DarkCurrentCorrection.clicked.connect(self.pushDarkCurrentCorrectionButton_click)
+        self.ExposureTimeAndSensorGainCorrection.clicked.connect(self.pushExposureTimeAndSensorGainCorrectionButton_click)
+        self.VignettingCorrection.clicked.connect(self.pushVignettingCorrectionButton_click)
+        
         self.VI.clicked.connect(self.pushVIButton_click)
 
         self.ModelSet.currentIndexChanged.connect(self.modelSet)
         self.Seg.clicked.connect(self.modelDetect)
 
         self.CachaPath = "./Cache/"
+
         self.GreenPath = self.CachaPath + "Green.TIF"
         self.RedPath = self.CachaPath + "Red.TIF"
         self.BluePath = self.CachaPath + "Blue.TIF"
         self.NIRPath = self.CachaPath + "NIR.TIF"
         self.RePath = self.CachaPath + "RE.TIF"
-        self.VIPath = self.CachaPath + "VI.TIF"
+        self.ResultPath = self.CachaPath + "Result.TIF"
+
+        self.afterIncorporatedPhaseAlignmentGreenPath = self.CachaPath + "afterIncorporatedPhaseAlignmentGreenPath.TIF"
+        self.afterIncorporatedPhaseAlignmentRedPath = self.CachaPath + "afterIncorporatedPhaseAlignmentRedPath.TIF"
+        self.afterIncorporatedPhaseAlignmentBluePath = self.CachaPath + "afterIncorporatedPhaseAlignmentBluePath.TIF"
+        self.afterIncorporatedPhaseAlignmentNIRPath = self.CachaPath + "afterIncorporatedPhaseAlignmentNIRPath.TIF"
+        self.afterIncorporatedPhaseAlignmentRePath = self.CachaPath + "afterIncorporatedPhaseAlignmentRePath.TIF"
+
+        self.afterDarkCurrentCorrectionGreenPath = self.CachaPath + "afterDarkCurrentCorrectionGreen.TIF"
+        self.afterDarkCurrentCorrectionRedPath = self.CachaPath + "afterDarkCurrentCorrectionRed.TIF"
+        self.afterDarkCurrentCorrectionBluePath = self.CachaPath + "afterDarkCurrentCorrectionBlue.TIF"
+        self.afterDarkCurrentCorrectionNIRPath = self.CachaPath + "afterDarkCurrentCorrectionNIR.TIF"
+        self.afterDarkCurrentCorrectionRePath = self.CachaPath + "afterDarkCurrentCorrectionRE.TIF"
+
+        self.afterExposureTimeAndSensorGainCorrectionGreenPath = self.CachaPath + "afterExposureTimeAndSensorGainCorrectionGreen.TIF "
+        self.afterExposureTimeAndSensorGainCorrectionRedPath = self.CachaPath + "afterExposureTimeAndSensorGainCorrectionRed.TIF"
+        self.afterExposureTimeAndSensorGainCorrectionBluePath = self.CachaPath + "afterExposureTimeAndSensorGainCorrectionBlue.TIF"
+        self.afterExposureTimeAndSensorGainCorrectionNIRPath = self.CachaPath + "afterExposureTimeAndSensorGainCorrectionNIR.TIF"
+        self.afterExposureTimeAndSensorGainCorrectionRePath = self.CachaPath + "afterExposureTimeAndSensorGainCorrectionRE.TIF"
+
+        self.afterVignettingCorrectionGreenPath = self.CachaPath + "afterVignettingCorrectionGreen.TIF"
+        self.afterVignettingCorrectionRedPath = self.CachaPath + "afterVignettingCorrectionRed.TIF"
+        self.afterVignettingCorrectionBluePath = self.CachaPath + "afterVignettingCorrectionBlue.TIF"
+        self.afterVignettingCorrectionNIRPath = self.CachaPath + "afterVignettingCorrectionNIR.TIF"
+        self.afterVignettingCorrectionRePath = self.CachaPath + "afterVignettingCorrectionRE.TIF"
+
 
         self.model = Model()
 
@@ -110,23 +169,92 @@ class MyPyQT_Form(QtWidgets.QWidget, Ui_Dialog):
 
     def pushIncorporatedPhaseAlignmentButton_click(self):
         print('IncorporatedPhaseAlignment is clicked')
-        incorporatedPhaseAlignment(self.RedPath, 'red')
-        print('red is done')
-        incorporatedPhaseAlignment(self.GreenPath, 'green')
-        incorporatedPhaseAlignment(self.BluePath, 'blue')
-        incorporatedPhaseAlignment(self.NIRPath, 'nir')
-        incorporatedPhaseAlignment(self.RePath, 'red_edge')
-        print('green is done')
-        self.flashAllImage()
-
-    def pushVIButton_click(self):
-        print('VI is clicked')
-        VIName = self.VISet.currentText()
         red = tf.imread(self.RedPath)
         green = tf.imread(self.GreenPath)
         blue = tf.imread(self.BluePath)
         nir = tf.imread(self.NIRPath)
         re = tf.imread(self.RePath)
+
+        red = incorporatedPhaseAlignment(red, 'red')
+        green = incorporatedPhaseAlignment(green, 'green')
+        blue = incorporatedPhaseAlignment(blue, 'blue')
+        nir = incorporatedPhaseAlignment(nir, 'nir')
+        re = incorporatedPhaseAlignment(re, 'red_edge')
+
+        tf.imwrite(self.afterIncorporatedPhaseAlignmentRedPath, red)
+        tf.imwrite(self.afterIncorporatedPhaseAlignmentGreenPath, green)
+        tf.imwrite(self.afterIncorporatedPhaseAlignmentBluePath, blue)
+        tf.imwrite(self.afterIncorporatedPhaseAlignmentNIRPath, nir)
+        tf.imwrite(self.afterIncorporatedPhaseAlignmentRePath, re)
+
+    def pushDarkCurrentCorrectionButton_click(self):
+        print('DarkCurrentCorrection is clicked')
+        red = tf.imread(self.afterIncorporatedPhaseAlignmentRedPath)
+        green = tf.imread(self.afterIncorporatedPhaseAlignmentGreenPath)
+        blue = tf.imread(self.afterIncorporatedPhaseAlignmentBluePath)
+        nir = tf.imread(self.afterIncorporatedPhaseAlignmentNIRPath)
+        re = tf.imread(self.afterIncorporatedPhaseAlignmentRePath)
+        red = darkCurrentCorrection(red, self.RedPath)
+        green = darkCurrentCorrection(green, self.GreenPath)
+        blue = darkCurrentCorrection(blue, self.BluePath)
+        nir = darkCurrentCorrection(nir, self.NIRPath)
+        re = darkCurrentCorrection(re, self.RePath)
+        tf.imwrite(self.afterDarkCurrentCorrectionBluePath, blue)
+        tf.imwrite(self.afterDarkCurrentCorrectionGreenPath, green)
+        tf.imwrite(self.afterDarkCurrentCorrectionRedPath, red)
+        tf.imwrite(self.afterDarkCurrentCorrectionNIRPath, nir)
+        tf.imwrite(self.afterDarkCurrentCorrectionRePath, re)
+
+    def pushExposureTimeAndSensorGainCorrectionButton_click(self):
+        print('ExposureTimeAndSensorGainCorrection is clicked')
+        blue = tf.imread(self.afterDarkCurrentCorrectionBluePath)
+        green = tf.imread(self.afterDarkCurrentCorrectionGreenPath)
+        red = tf.imread(self.afterDarkCurrentCorrectionRedPath)
+        nir = tf.imread(self.afterDarkCurrentCorrectionNIRPath)
+        re = tf.imread(self.afterDarkCurrentCorrectionRePath)
+
+        red = exposureTimeAndSensorGainCorrection(red, self.RedPath)
+        green = exposureTimeAndSensorGainCorrection(green, self.GreenPath)
+        blue = exposureTimeAndSensorGainCorrection(blue, self.BluePath)
+        nir = exposureTimeAndSensorGainCorrection(nir, self.NIRPath)
+        re = exposureTimeAndSensorGainCorrection(re, self.RePath)
+
+        tf.imwrite(self.afterExposureTimeAndSensorGainCorrectionBluePath, blue)
+        tf.imwrite(self.afterExposureTimeAndSensorGainCorrectionGreenPath, green)
+        tf.imwrite(self.afterExposureTimeAndSensorGainCorrectionRedPath, red)
+        tf.imwrite(self.afterExposureTimeAndSensorGainCorrectionNIRPath, nir)
+        tf.imwrite(self.afterExposureTimeAndSensorGainCorrectionRePath, re)
+
+
+    def pushVignettingCorrectionButton_click(self):
+        print('VignettingCorrection is clicked')
+        red = tf.imread(self.afterExposureTimeAndSensorGainCorrectionRedPath)
+        green = tf.imread(self.afterExposureTimeAndSensorGainCorrectionGreenPath)
+        blue = tf.imread(self.afterExposureTimeAndSensorGainCorrectionBluePath)
+        nir = tf.imread(self.afterExposureTimeAndSensorGainCorrectionNIRPath)
+        re = tf.imread(self.afterExposureTimeAndSensorGainCorrectionRePath)
+
+        red = vignettingCorrection(red, self.RedPath)
+        green = vignettingCorrection(green, self.GreenPath)
+        blue = vignettingCorrection(blue, self.BluePath)
+        nir = vignettingCorrection(nir, self.NIRPath)
+        re = vignettingCorrection(re, self.RePath)
+
+        tf.imwrite(self.afterVignettingCorrectionBluePath, blue)
+        tf.imwrite(self.afterVignettingCorrectionGreenPath, green)
+        tf.imwrite(self.afterVignettingCorrectionRedPath, red)
+        tf.imwrite(self.afterVignettingCorrectionNIRPath, nir)
+        tf.imwrite(self.afterVignettingCorrectionRePath, re)
+
+
+    def pushVIButton_click(self):
+        print('VI is clicked')
+        VIName = self.VISet.currentText()
+        red = tf.imread(self.afterVignettingCorrectionRedPath)
+        green = tf.imread(self.afterVignettingCorrectionGreenPath)
+        blue = tf.imread(self.afterVignettingCorrectionBluePath)
+        nir = tf.imread(self.afterVignettingCorrectionNIRPath)
+        re = tf.imread(self.afterVignettingCorrectionRePath)
         if VIName == 'NDVI':
             print('NDVI is selected')
             vi = (nir - red) / (nir + red)
@@ -136,9 +264,19 @@ class MyPyQT_Form(QtWidgets.QWidget, Ui_Dialog):
         elif VIName == "RVI":
             print('RVI is selected')
             vi = red / nir
-        print('VI is done')
-        tf.imwrite(self.VIPath, vi)
-        self.Result.setPixmap(QPixmap(self.VIPath).scaled(320, 260))
+        elif VIName == 'ARI':
+            vi = 1/green - 1/re
+        elif VIName == 'OSAVI':
+            vi = (nir - red) / (nir + red + 0.16)
+        vi = np.uint8(vi * 255)
+        vi = np.uint8(vi)
+        tf.imwrite(self.ResultPath, vi)
+        # image = cv2.imread(self.CachaPath+ VIName + '.TIF')
+        # PsedoImage2 = cv2.applyColorMap(image, colormap=cv2.COLORMAP_HSV)
+        # cv2.imwrite(self.CachaPath + VIName + '.jpg', PsedoImage2)
+        # print('VI is done')
+
+        self.Result.setPixmap(QPixmap(self.ResultPath).scaled(320, 260))
 
     def modelSet(self):
         modelName = self.ModelSet.currentText()
